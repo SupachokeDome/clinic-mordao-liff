@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>คิวของฉัน · คลินิกหมอดาว</title>
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #f4f5f7; --card: #fff; --ink: #16191d; --muted: #5d6672; --line: #e1e4e8;
+    --green: #15803d; --green-bg: #dcfce7; --blue: #1d4ed8; --red: #b91c1c; --red-bg: #fde8e8;
+    --amber: #92400e; --amber-bg: #fef3c7;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: var(--bg); color: var(--ink); }
+  body { font: 20px/1.5 -apple-system, BlinkMacSystemFont, "Sukhumvit Set", "Noto Sans Thai", Tahoma, sans-serif; }
+  main { max-width: 520px; margin: 0 auto; padding: 12px 16px 32px; }
+  h1 { font-size: 20px; margin: 4px 0 12px; font-weight: 600; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 16px; padding: 16px; margin-bottom: 14px; text-align: center; }
+  .card.calling { background: var(--green-bg); border-color: var(--green); }
+  .card.skipped { background: var(--amber-bg); border-color: #f59e0b; }
+  .label { color: var(--muted); font-size: 18px; }
+  .big { font-size: 84px; font-weight: 800; line-height: 1.05; font-variant-numeric: tabular-nums; }
+  .state { font-size: 24px; margin: 8px 0 4px; }
+  .state.strong { font-weight: 800; font-size: 28px; }
+  .state b { font-size: 44px; font-variant-numeric: tabular-nums; }
+  .seg { display: flex; gap: 8px; justify-content: center; margin: 6px 0; }
+  .seg button { flex: 1; max-width: 72px; }
+  button, a.button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink); border-radius: 12px; padding: 10px 14px; min-height: 52px; cursor: pointer; text-decoration: none; display: inline-block; }
+  button.on { background: var(--ink); border-color: var(--ink); color: #fff; font-weight: 700; }
+  .primary, a.button.primary { background: var(--green); border-color: var(--green); color: #fff; font-weight: 700; }
+  .danger { background: var(--red); border-color: var(--red); color: #fff; font-weight: 700; }
+  button.link { border: 0; background: none; color: var(--muted); text-decoration: underline; min-height: 44px; font-size: 18px; margin-top: 6px; }
+  .confirm { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); }
+  .confirm button { margin: 4px; }
+  .banner { border-radius: 12px; padding: 12px 14px; margin-bottom: 14px; font-weight: 600; text-align: center; }
+  .banner.pause, .banner.warn { background: var(--amber-bg); color: var(--amber); }
+  .banner.good { background: var(--green-bg); color: var(--green); }
+  .banner.bad { background: var(--red-bg); color: var(--red); }
+  .queue { text-align: center; font-size: 22px; margin: 4px 0 16px; }
+  .queue b { font-variant-numeric: tabular-nums; }
+  .muted { color: var(--muted); font-size: 17px; }
+  .note { color: var(--muted); font-size: 17px; margin: 6px 0; }
+  .privacy { color: var(--muted); font-size: 15px; margin-top: 18px; }
+  .privacy a { color: var(--blue); }
+  footer { text-align: center; color: var(--muted); font-size: 14px; margin-top: 12px; }
+  .center { text-align: center; }
+</style>
+</head>
+<body>
+<main id="app" aria-live="polite"><h1>คลินิกหมอดาว</h1><p class="muted center">กำลังโหลด…</p></main>
+<script src="config.js?v=1"></script>
+<script charset="utf-8" src="https://static.line-scdn.net/liff/edge/versions/2.31.0/sdk.js"></script>
+<script>
+// <app> Page logic without DOM access; test/harness.js runs this block against the real Code.gs.
+var QueueApp = (function () {
+  var CLIENT_VERSION = 1;   // bump when the server raises MIN_CLIENT_VERSION
+  var POLL_MS = 30000;
+  var TIMEOUT_MS = 25000;
+  var ALERTS = [2, 3, 5, 10];
+  var ACTIVE = { Waiting: true, Calling: true };
+
+  // Card number and code from "?card=12&c=K7P2", or from LIFF's "?liff.state=%3Fcard%3D12..." before init.
+  function readCard(search) {
+    var p = parseQuery(search);
+    if (!p.card && p['liff.state']) {
+      var inner = p['liff.state'], q = inner.indexOf('?');
+      p = parseQuery(q >= 0 ? inner.slice(q) : '');
+    }
+    var n = parseInt(p.card, 10);
+    return { card: n >= 1 && n <= 999 ? n : null, code: p.c || '' };
+  }
+  function parseQuery(search) {
+    var out = {};
+    String(search || '').replace(/^\?/, '').split('&').forEach(function (kv) {
+      if (!kv) return;
+      var i = kv.indexOf('='), k = i < 0 ? kv : kv.slice(0, i), v = i < 0 ? '' : kv.slice(i + 1);
+      try { out[decodeURIComponent(k.replace(/\+/g, ' '))] = decodeURIComponent(v.replace(/\+/g, ' ')); } catch (e) { /* bad escape */ }
+    });
+    return out;
+  }
+
+  function create(env) {
+    var cfg = env.config || {};
+    var st = { phase: 'loading', card: null, code: '', result: null, cardStatus: null, tickets: [], queue: null,
+      friend: null, error: null, stale: false, notice: '', confirm: null, busy: false, updated: null };
+    var timer = null, visible = true, idToken = null;
+
+    function draw() { env.root.innerHTML = view(st, cfg); }
+    function fail(code, msg) { st.phase = 'error'; st.error = { code: code, msg: msg || '' }; draw(); }
+    function hasActive() {
+      return !(st.queue && st.queue.closed) && st.tickets.some(function (t) { return !t.expired && ACTIVE[t.status]; });
+    }
+    function configOk() {
+      return /^\d{10}-[A-Za-z0-9]{8}$/.test(cfg.LIFF_ID || '') && /^https:\/\/script\.google\.com\//.test(cfg.GAS_URL || '');
+    }
+
+    function call(action, body) {
+      body.action = action;
+      var request = env.fetch(cfg.GAS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'text/plain;charset=utf-8' },   // "simple" request: no CORS preflight
+        body: JSON.stringify(body),
+      }).then(function (r) { return r.json(); });
+      var timeout = new Promise(function (resolve, reject) { env.setTimeout(function () { reject(new Error('timeout')); }, TIMEOUT_MS); });
+      return Promise.race([request, timeout]).then(function (res) {
+        if (!res) return { ok: false, error: 'server' };
+        if (res.minClientVersion > CLIENT_VERSION && reloadOnce(res.minClientVersion)) return new Promise(function () {});
+        return res;
+      }, function () { return { ok: false, error: 'network' }; });
+    }
+
+    // A newer server asks for a newer page: reload once with a cache-busting parameter, never in a loop.
+    function reloadOnce(min) {
+      var key = 'clinicQueue.reloadedFor';
+      try {
+        if (env.storage.getItem(key) === String(min)) return false;
+        env.storage.setItem(key, String(min));
+      } catch (e) { return false; }
+      env.reload(min);
+      return true;
+    }
+
+    // kind: 'full' (bind/mine: every ticket of this LINE today), 'status' (refresh), 'one' (setAlert/cancel)
+    function take(res, kind) {
+      if (!res.ok) {
+        if (st.phase === 'ready') {
+          if (kind === 'status') st.stale = true;
+          else st.notice = res.msg || 'ทำรายการไม่สำเร็จ ลองใหม่อีกครั้ง';
+          draw();
+          schedule();
+          return;
+        }
+        fail(res.error, res.msg);
+        return;
+      }
+      st.stale = false;
+      st.notice = '';
+      st.updated = env.now();
+      if (res.queue) st.queue = res.queue;
+      if (kind === 'full') {
+        st.tickets = res.tickets || [];
+        if (res.result) { st.result = res.result; st.cardStatus = res.status || null; }
+      } else if (kind === 'status') {
+        st.tickets = st.tickets.map(function (old) {
+          var fresh = find(res.tickets, old.ticket);
+          if (!fresh) return old;
+          return fresh.expired ? merge(old, { expired: true }) : fresh;
+        });
+      } else if (res.ticket) {
+        st.tickets = st.tickets.map(function (old) { return old.ticket === res.ticket.ticket ? res.ticket : old; });
+      }
+      st.phase = 'ready';
+      draw();
+      schedule();
+    }
+
+    function schedule() {
+      if (timer) env.clearTimeout(timer);
+      timer = null;
+      if (visible && hasActive()) timer = env.setTimeout(poll, POLL_MS);
+    }
+    function poll() {
+      timer = null;
+      if (!visible || !hasActive()) return;
+      call('status', { tickets: st.tickets.map(function (t) { return t.ticket; }) }).then(function (res) { take(res, 'status'); });
+    }
+
+    function checkFriend() {
+      if (!env.liff.getFriendship) return;
+      env.liff.getFriendship().then(function (r) { st.friend = !!(r && r.friendFlag); if (st.phase === 'ready') draw(); }, function () {});
+    }
+
+    function start() {
+      var p = readCard(env.location.search);
+      st.card = p.card;
+      st.code = p.code;
+      st.phase = 'loading';
+      st.error = null;
+      draw();
+      if (!configOk()) return Promise.resolve(fail('config'));
+      if (!env.liff) return Promise.resolve(fail('init'));
+      return env.liff.init({ liffId: cfg.LIFF_ID }).then(function () {
+        var after = readCard(env.location.search);   // LIFF may restore the query string only after init
+        if (after.card) { st.card = after.card; st.code = after.code; }
+        if (!env.liff.isLoggedIn()) {
+          env.liff.login({ redirectUri: env.location.href });   // opened in a normal browser
+          return;
+        }
+        idToken = env.liff.getIDToken();
+        if (!idToken) { st.phase = 'needLogin'; draw(); return; }
+        checkFriend();
+        var req = st.card ? call('bind', { idToken: idToken, card: st.card, code: st.code }) : call('mine', { idToken: idToken });
+        return req.then(function (res) { take(res, 'full'); });
+      }, function () { fail('init'); });
+    }
+
+    function handle(name, data) {
+      data = data || {};
+      var t = find(st.tickets, data.ticket);
+      if (name === 'retry') return start();
+      if (name === 'login') return env.liff.login({ redirectUri: env.location.href });
+      if (st.busy) return;
+      if (name === 'alert' && t) {
+        var n = Number(data.n), before = t.alertAhead;
+        t.alertAhead = n;   // show the choice at once
+        st.busy = true;
+        draw();
+        return call('setAlert', { ticket: t.ticket, n: n }).then(function (res) {
+          st.busy = false;
+          if (!res.ok) t.alertAhead = before;
+          take(res, 'one');
+        });
+      }
+      if (name === 'cancel' && t) { st.confirm = t.ticket; draw(); return; }
+      if (name === 'cancelNo') { st.confirm = null; draw(); return; }
+      if (name === 'cancelYes' && t) {
+        st.confirm = null;
+        st.busy = true;
+        draw();
+        return call('cancel', { ticket: t.ticket }).then(function (res) { st.busy = false; take(res, 'one'); });
+      }
+    }
+
+    function setVisible(v) {
+      visible = v;
+      if (v && st.phase === 'ready') poll();
+      else schedule();
+    }
+
+    return { start: start, handle: handle, setVisible: setVisible, state: function () { return st; } };
+  }
+
+  // ---------------------------------------------------------------- view (pure)
+
+  function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
+  function no(n) { return n === null || n === undefined ? '—' : '#' + n; }
+  function find(list, ticket) {
+    for (var i = 0; list && i < list.length; i++) if (list[i].ticket === ticket) return list[i];
+    return null;
+  }
+  function merge(a, b) {
+    var o = {}, k;
+    for (k in a) o[k] = a[k];
+    for (k in b) o[k] = b[k];
+    return o;
+  }
+  function two(n) { return (n < 10 ? '0' : '') + n; }
+
+  var HEAD = '<h1>คลินิกหมอดาว</h1>';
+  var NOTES = '<p class="note">📶 ต้องมีเน็ตในมือถือถึงจะได้แจ้งเตือน ถ้าแบตใกล้หมดหรือไม่มีเน็ต ให้รออยู่ในคลินิก</p>' +
+    '<p class="note">🔔 เปิดเสียงแจ้งเตือนแชทคลินิกไว้ด้วย</p>';
+  var PRIVACY = '<p class="privacy">ระบบเก็บชื่อ LINE และเวลาเข้าคิว เพื่อแจ้งเตือนคิวเท่านั้น และลบภายใน 30 วัน · ' +
+    '<a href="privacy.html">นโยบายความเป็นส่วนตัว</a></p>';
+  var FALLBACK = '<p class="muted">บัตรยังใช้รอฟังเสียงเรียกได้ตามปกติ</p>';
+
+  function view(st, cfg) {
+    if (st.phase === 'loading') {
+      return HEAD + '<section class="card">' + (st.card ? '<div class="label">บัตรคิว</div><div class="big">#' + st.card + '</div>' : '') +
+        '<p class="muted">กำลังโหลด…</p></section>';
+    }
+    if (st.phase === 'needLogin') {
+      return HEAD + '<section class="card"><p class="state">ต้องกดอนุญาตถึงจะได้แจ้งเตือน</p>' + FALLBACK +
+        '<button class="primary" data-act="login">ลองใหม่</button></section>';
+    }
+    if (st.phase === 'error') return HEAD + errorView(st);
+
+    var out = HEAD + pauseBanner(st.queue);
+    if (st.notice) out += '<div class="banner warn">' + esc(st.notice) + '</div>';
+    if (st.stale) out += '<div class="banner bad">ขาดการติดต่อ ข้อมูลอาจไม่ล่าสุด กรุณาฟังเสียงเรียกด้วย</div>';
+    var rb = resultBanner(st);
+    out += rb;
+    if (!st.tickets.length && !rb) {
+      out += '<section class="card"><p class="state">วันนี้คุณยังไม่มีคิว</p>' +
+        '<p class="muted">รับบัตรที่โต๊ะซักประวัติ แล้วสแกน QR หลังบัตร</p></section>';
+    }
+    st.tickets.forEach(function (t) { out += ticketView(t, st); });
+    out += queueLine(st.queue);
+    var waiting = st.tickets.some(function (t) { return !t.expired && t.status === 'Waiting'; });
+    if (waiting && st.friend === false && cfg.OA_ID) {
+      out += '<div class="banner warn">ยังไม่ได้เพิ่มเพื่อน LINE ของคลินิก จะไม่ได้รับแจ้งเตือน<br>' +
+        '<a class="button primary" href="https://line.me/R/ti/p/' + encodeURIComponent(cfg.OA_ID) + '">เพิ่มเพื่อน</a></div>';
+    }
+    out += NOTES + PRIVACY;
+    if (st.updated) out += '<footer>อัปเดต ' + two(st.updated.getHours()) + ':' + two(st.updated.getMinutes()) + '</footer>';
+    return out;
+  }
+
+  function errorView(st) {
+    var card = st.card ? '<div class="label">บัตรคิว</div><div class="big">#' + st.card + '</div>' : '';
+    var code = st.error && st.error.code;
+    if (code === 'config') return '<section class="card"><p class="state">ยังไม่ได้ตั้งค่าหน้าคิว (config.js)</p></section>';
+    if (code === 'badCode' || code === 'badCard') {
+      return '<section class="card">' + card + '<p class="state">QR นี้ไม่ถูกต้อง กรุณาแจ้งเจ้าหน้าที่ที่โต๊ะซักประวัติ</p>' + FALLBACK + '</section>';
+    }
+    if (code === 'auth') {
+      return '<section class="card">' + card + '<p class="state">เข้าสู่ระบบ LINE ไม่สำเร็จ</p>' + FALLBACK +
+        '<button class="primary" data-act="login">ลองใหม่</button></section>';
+    }
+    var title = code === 'init' ? 'เปิดหน้าคิวไม่สำเร็จ' : 'ระบบขัดข้อง กรุณารอฟังเสียงเรียกที่คลินิก';
+    return '<section class="card">' + card + '<p class="state">' + title + '</p>' + FALLBACK +
+      '<button class="primary" data-act="retry">ลองใหม่</button></section>';
+  }
+
+  function pauseBanner(q) {
+    if (!q || !q.pause || q.closed) return '';
+    var text = q.pause.reason === 'urgent' ? 'หมอรับเคสด่วน รอสักครู่' : '⏸ หมอพักอยู่' + (q.pause.until ? ' กลับประมาณ ' + esc(q.pause.until) : '');
+    return '<div class="banner pause">' + text + '</div>';
+  }
+
+  function resultBanner(st) {
+    var n = '#' + st.card;
+    switch (st.result) {
+      case 'taken': return '<div class="banner bad">บัตร ' + n + ' ถูกผูกกับ LINE อื่นไปแล้ว ถ้านี่คือบัตรของคุณ กรุณาแจ้งเจ้าหน้าที่ที่โต๊ะซักประวัติ<br>ระหว่างนี้รอฟังเสียงเรียกได้ตามปกติ</div>';
+      case 'called': return '<div class="banner good">ถึงคิว ' + n + ' แล้ว เชิญมารอหน้าห้องตรวจได้เลย</div>';
+      case 'closed': return '<div class="banner warn">วันนี้ปิดคิวแล้ว</div>';
+      case 'tooMany': return '<div class="banner bad">LINE นี้ผูกบัตรครบ 5 ใบแล้ววันนี้ กรุณาแจ้งเจ้าหน้าที่</div>';
+      case 'finished':
+        if (st.cardStatus === 'Done') return '<div class="banner warn">คิว ' + n + ' ตรวจไปแล้ว</div>';
+        if (st.cardStatus === 'Skipped') return '<div class="banner warn">คิว ' + n + ' เลยไปแล้ว กรุณาแจ้งเจ้าหน้าที่ที่โต๊ะซักประวัติ</div>';
+        return '<div class="banner warn">คิว ' + n + ' ถูกยกเลิกแล้ว ถ้าไม่ได้ตั้งใจ กรุณาแจ้งเจ้าหน้าที่</div>';
+      default: return '';
+    }
+  }
+
+  function ticketView(t, st) {
+    var cls = '', body;
+    if (t.expired) body = '<p class="state">คิวนี้หมดอายุหรือถูกปลดการผูกแล้ว</p>';
+    else if (t.status === 'Waiting') {
+      body = (t.ahead === 0 ? '<p class="state strong">คุณเป็นคนถัดไป</p>' : '<p class="state">ก่อนหน้าคุณ <b>' + t.ahead + '</b> คิว</p>') +
+        alertPicker(t, st) + cancelPart(t, st);
+    } else if (t.status === 'Calling') {
+      cls = ' calling';
+      body = '<p class="state strong">ถึงคิวคุณแล้ว<br>เชิญมารอหน้าห้องตรวจ</p>';
+    } else if (t.status === 'Done') body = '<p class="state">ตรวจแล้ว</p>';
+    else if (t.status === 'Skipped') {
+      cls = ' skipped';
+      body = '<p class="state">เลยคิวแล้ว กรุณาแจ้งเจ้าหน้าที่ที่โต๊ะซักประวัติ</p>';
+    } else if (t.status === 'Cancelled') body = '<p class="state">ยกเลิกคิวแล้ว ถ้ากดผิด กรุณาแจ้งเจ้าหน้าที่</p>';
+    else body = '';
+    return '<section class="card' + cls + '"><div class="label">คิวของคุณ</div><div class="big">#' + t.n + '</div>' + body + '</section>';
+  }
+
+  function alertPicker(t, st) {
+    var tk = esc(t.ticket);
+    return '<div class="label">เตือนฉันเมื่อเหลือ</div><div class="seg">' + ALERTS.map(function (k) {
+      return '<button data-act="alert" data-ticket="' + tk + '" data-n="' + k + '" aria-pressed="' + (t.alertAhead === k) + '"' +
+        (t.alertAhead === k ? ' class="on"' : '') + (st.busy ? ' disabled' : '') + '>' + k + '</button>';
+    }).join('') + '</div><div class="label">คิว</div>' +
+      (st.friend === true ? '<p class="muted">แจ้งเตือนทาง LINE: เปิดอยู่</p>' : '');
+  }
+
+  function cancelPart(t, st) {
+    var tk = esc(t.ticket);
+    if (st.confirm !== t.ticket) return '<button class="link" data-act="cancel" data-ticket="' + tk + '">ยกเลิกคิว</button>';
+    return '<div class="confirm"><p>ยกเลิกคิว #' + t.n + ' ใช่ไหม? ยกเลิกแล้วจะไม่ถูกเรียก</p>' +
+      '<button class="danger" data-act="cancelYes" data-ticket="' + tk + '">ยกเลิกคิว</button>' +
+      '<button data-act="cancelNo">ไม่ยกเลิก</button></div>';
+  }
+
+  function queueLine(q) {
+    if (!q) return '';
+    if (q.closed) return '<p class="queue">วันนี้ปิดคิวแล้ว</p>';
+    return '<p class="queue">กำลังตรวจ <b>' + no(q.inRoom) + '</b> · รอหน้าห้อง <b>' + no(q.calling) + '</b></p>';
+  }
+
+  return { create: create, view: view, readCard: readCard, CLIENT_VERSION: CLIENT_VERSION };
+})();
+// </app>
+
+(function boot() {
+  var root = document.getElementById('app');
+  var store;
+  try { store = window.sessionStorage; } catch (e) { store = { getItem: function () { return null; }, setItem: function () {} }; }
+  var app = QueueApp.create({
+    liff: window.liff || null,
+    fetch: window.fetch.bind(window),
+    config: window.CLINIC_CONFIG || {},
+    root: root,
+    location: window.location,
+    storage: store,
+    setTimeout: window.setTimeout.bind(window),
+    clearTimeout: window.clearTimeout.bind(window),
+    now: function () { return new Date(); },
+    reload: function (v) {
+      var url = location.href.replace(/([?&])_v=[^&]*&?/, '$1').replace(/[?&]$/, '');
+      location.replace(url + (url.indexOf('?') < 0 ? '?' : '&') + '_v=' + v + '-' + Date.now());
+    },
+  });
+  root.addEventListener('click', function (e) {
+    var el = e.target.closest('[data-act]');
+    if (!el || el.disabled) return;
+    app.handle(el.getAttribute('data-act'), { ticket: el.getAttribute('data-ticket'), n: el.getAttribute('data-n') });
+  });
+  document.addEventListener('visibilitychange', function () { app.setVisible(document.visibilityState === 'visible'); });
+  app.start();
+})();
+</script>
+</body>
+</html>
